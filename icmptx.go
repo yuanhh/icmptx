@@ -24,9 +24,12 @@ func main() {
 	t := icmptxutil.NewIcmptx()
 
 	if *isServer {
+		fmt.Println("Running as server mode...")
+
 		t.SetSource(proxyAddr)
 		t.SetMode(*isServer)
 	} else if *isClient {
+		fmt.Println("Runnging as client mode...")
 		t.SetAddr(proxyAddr)
 		t.SetID(os.Getpid() & 0xffff)
 	}
