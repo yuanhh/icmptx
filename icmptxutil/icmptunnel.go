@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	MTU          = 65536
+	MTU          = 1472
 	protocolICMP = 1
 )
 
@@ -214,7 +214,7 @@ func (t *Icmptx) recvTun(
 		case <-t.done:
 			return
 		default:
-			rs := make([]byte, MTU)
+			rs := make([]byte, 1472)
 			_, err := f.Read(rs)
 			if err != nil {
 				if err != io.EOF {

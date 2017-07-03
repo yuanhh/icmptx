@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
 	"icmptx/icmptxutil"
@@ -18,6 +19,7 @@ func main() {
 		return
 	}
 	proxyAddr := flag.Arg(0)
+	fmt.Println("ICMPTX Proxy at", flag.Arg(0))
 
 	t := icmptxutil.NewIcmptx()
 
