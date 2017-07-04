@@ -25,7 +25,6 @@ func main() {
 
 	if *isServer {
 		fmt.Println("Running as server mode...")
-
 		t.SetSource(proxyAddr)
 		t.SetMode(*isServer)
 	} else if *isClient {
