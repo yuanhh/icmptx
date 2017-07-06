@@ -10,8 +10,8 @@ import (
 
 func main() {
 
-	isServer := flag.Bool("s", false, "running icmptx as server")
-	isClient := flag.Bool("c", false, "running icmptx as client")
+	proxy := flag.Bool("s", false, "running icmptx as server")
+	client := flag.Bool("c", false, "running icmptx as client")
 	flag.Parse()
 
 	if flag.NArg() == 0 {
@@ -23,11 +23,11 @@ func main() {
 
 	t := icmptxutil.NewIcmptx()
 
-	if *isServer {
+	if *proxy {
 		fmt.Println("Running as server mode...")
 		t.SetSource(proxyAddr)
-		t.SetMode(*isServer)
-	} else if *isClient {
+		t.SetProxy(*proxy)
+	} else if *client {
 		fmt.Println("Runnging as client mode...")
 		t.SetAddr(proxyAddr)
 		t.SetID(os.Getpid() & 0xffff)

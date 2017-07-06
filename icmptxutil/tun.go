@@ -1,6 +1,7 @@
 package icmptxutil
 
 import (
+	"net"
 	"os"
 	"syscall"
 	"unsafe"
@@ -18,7 +19,7 @@ type ifReq struct {
 	flags uint16
 }
 
-func OpenTun() (*os.File, error) {
+func OpenTun() (net.PacketConn, error) {
 	var ifr ifReq
 
 	f, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
@@ -33,7 +34,10 @@ func OpenTun() (*os.File, error) {
 		f.Close()
 		return nil, err
 	}
-	return f, nil
+
+	c, err := net.FilePacketConn(f)
+
+	return c, err
 }
 
 func ioctl(fd uintptr, request int, argp uintptr) error {

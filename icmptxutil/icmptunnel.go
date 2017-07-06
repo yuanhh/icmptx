@@ -1,7 +1,6 @@
 package icmptxutil
 
 import (
-	"io"
 	"log"
 	"net"
 	"os"
@@ -20,7 +19,7 @@ const (
 )
 
 type Icmptx struct {
-	isSrv bool
+	proxy bool
 
 	Timeout *time.Ticker
 
@@ -41,7 +40,7 @@ type packet struct {
 
 func NewIcmptx() *Icmptx {
 	return &Icmptx{
-		isSrv:   false,
+		proxy:   false,
 		Timeout: nil,
 		done:    make(chan bool),
 		ipaddr:  nil,
@@ -51,8 +50,8 @@ func NewIcmptx() *Icmptx {
 	}
 }
 
-func (t *Icmptx) IsServer() bool {
-	return t.isSrv
+func (t *Icmptx) Proxy() bool {
+	return t.proxy
 }
 
 func (t *Icmptx) IPAddr() *net.IPAddr {
@@ -95,53 +94,58 @@ func (t *Icmptx) SetID(id int) {
 	t.id = id
 }
 
-func (t *Icmptx) SetMode(isSrv bool) {
-	t.isSrv = isSrv
+func (t *Icmptx) SetProxy(proxy bool) {
+	t.proxy = proxy
 }
 
 func (t *Icmptx) Run() {
-	f, err := OpenTun()
+	fc, err := OpenTun()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer f.Close()
+	defer fc.Close()
 
-	c, err := icmp.ListenPacket("ip4:icmp", t.source)
+	ic, err := icmp.ListenPacket("ip4:icmp", t.source)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer c.Close()
+	defer ic.Close()
 
 	var wg sync.WaitGroup
 	rawSock := make(chan *packet, 5)
-	tunDev := make(chan []byte, 5)
-	go t.handleSignals()
-	wg.Add(1)
-	go t.recvICMP(c, rawSock, &wg)
-	go t.recvTun(f, tunDev)
+	tunDev := make(chan *packet, 5)
+	wg.Add(2)
+	go t.recvICMP(ic, rawSock, &wg)
+	go t.recvTun(fc, tunDev, &wg)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
 	t.Timeout = time.NewTicker(1 * time.Second)
-	if t.isSrv {
+	if t.proxy {
 		t.Timeout.Stop()
 	}
 	for {
 		select {
+		case <-sig:
+			log.Println(sig)
+			close(t.done)
 		case <-t.done:
 			wg.Wait()
 			log.Println("Wait done!")
 			return
 		case p := <-rawSock:
-			err = t.processICMP(c, f, p)
+			err = t.processICMP(ic, fc, p)
 			if err != nil {
 				log.Fatal(err)
 			}
-		case s := <-tunDev:
-			err = t.processTrans(c, s)
+		case r := <-tunDev:
+			err = t.processTrans(ic, r)
 			if err != nil {
-				log.Fatal()
+				log.Fatal(err)
 			}
 		case <-t.Timeout.C:
-			err = t.sendICMPMsg(c, ipv4.ICMPTypeEcho, []byte(""))
+			err = t.sendICMPMsg(ic, ipv4.ICMPTypeEcho, []byte(""))
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -161,16 +165,12 @@ func ParseICMPEcho(b []byte) (*icmp.Echo, error) {
 }
 
 func (t *Icmptx) handleSignals() {
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigs
-	log.Println(sig)
 	close(t.done)
 	return
 }
 
 func (t *Icmptx) recvICMP(
-	c *icmp.PacketConn,
+	ic *icmp.PacketConn,
 	recv chan<- *packet,
 	wg *sync.WaitGroup,
 ) {
@@ -182,13 +182,14 @@ func (t *Icmptx) recvICMP(
 			return
 		default:
 			rb := make([]byte, MTU)
-			c.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
-			n, peer, err := c.ReadFrom(rb)
+			ic.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
+			n, peer, err := ic.ReadFrom(rb)
 			if err != nil {
 				if neterr, ok := err.(*net.OpError); ok {
 					if neterr.Timeout() {
 						continue
 					} else {
+						close(t.done)
 						return
 					}
 				}
@@ -198,20 +199,33 @@ func (t *Icmptx) recvICMP(
 	}
 }
 
-func (t *Icmptx) recvTun(f *os.File, recv chan<- []byte) error {
+func (t *Icmptx) recvTun(
+	fc net.PacketConn,
+	recv chan<- *packet,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
 
 	for {
-		rs := make([]byte, 1472)
-		_, err := f.Read(rs)
-		if err != nil {
-			if err != io.EOF {
-				close(t.done)
-				return nil
-			} else {
-				return err
+		select {
+		case <-t.done:
+			return
+		default:
+			rb := make([]byte, MTU)
+			fc.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
+			n, peer, err := fc.ReadFrom(rb)
+			if err != nil {
+				if neterr, ok := err.(*net.OpError); ok {
+					if neterr.Timeout() {
+						continue
+					} else {
+						close(t.done)
+						return
+					}
+				}
 			}
+			recv <- &packet{bytes: rb, nbytes: n, peer: peer}
 		}
-		recv <- rs
 	}
 }
 
@@ -264,8 +278,8 @@ func sendICMPEcho(
 }
 
 func (t *Icmptx) processICMP(
-	c *icmp.PacketConn,
-	f *os.File,
+	ic *icmp.PacketConn,
+	fc net.PacketConn,
 	recv *packet,
 ) error {
 	rb := recv.bytes
@@ -283,12 +297,13 @@ func (t *Icmptx) processICMP(
 	case ipv4.ICMPTypeEchoReply, ipv4.ICMPTypeEcho:
 		if t.id == 0 {
 			t.id = e.ID
+			t.SetAddr(recv.peer.String())
 		}
 		if e.ID == t.id {
 			log.Println("write to tun")
-			f.Write(e.Data)
+			fc.WriteTo(e.Data, recv.peer)
 		} else if rm.Type == ipv4.ICMPTypeEcho {
-			sendICMPEcho(c, recv.peer.String(), ipv4.ICMPTypeEchoReply, e)
+			sendICMPEcho(ic, recv.peer.String(), ipv4.ICMPTypeEchoReply, e)
 		} else {
 			log.Printf("unknown icmp reply %+v\n", rm)
 		}
@@ -298,15 +313,15 @@ func (t *Icmptx) processICMP(
 	return nil
 }
 
-func (t *Icmptx) processTrans(c *icmp.PacketConn, mb []byte) error {
+func (t *Icmptx) processTrans(c *icmp.PacketConn, recv *packet) error {
 	var err error
-	if t.isSrv {
+	if t.proxy {
 		log.Println("proxy to client")
-		err = t.sendICMPMsg(c, ipv4.ICMPTypeEchoReply, mb)
+		err = t.sendICMPMsg(c, ipv4.ICMPTypeEchoReply, recv.bytes)
 	} else {
 		log.Println("proxy to server")
 		t.Timeout = time.NewTicker(1 * time.Second)
-		err = t.sendICMPMsg(c, ipv4.ICMPTypeEcho, mb)
+		err = t.sendICMPMsg(c, ipv4.ICMPTypeEcho, recv.bytes)
 	}
 	return err
 }
